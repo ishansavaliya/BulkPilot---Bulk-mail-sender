@@ -7,6 +7,9 @@ import { extractPlaceholders } from "@/lib/placeholders";
 
 const MAX_ATTACH_BYTES = 4 * 1024 * 1024; // 4MB/file — keeps localStorage happy
 
+// Tags that match the sample Excel columns — click to insert into subject/body.
+const SAMPLE_TAGS = ["name", "company", "email"];
+
 function fileToAttachment(file: File): Promise<StoredAttachment> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -51,6 +54,10 @@ export default function TemplateStep({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  // which field the cursor was last in, so the tag lands where the user expects
+  const [lastFocused, setLastFocused] = useState<"subject" | "body">("body");
 
   useEffect(() => {
     const loaded = loadTemplates();
@@ -95,6 +102,31 @@ export default function TemplateStep({
         t.id === active.id ? { ...t, ...patch, updatedAt: Date.now() } : t
       )
     );
+  };
+
+  /** Insert {{tag}} at the cursor of the last-focused field (subject or body). */
+  const insertTag = (tag: string) => {
+    if (!active) return;
+    const token = `{{${tag}}}`;
+    const el = lastFocused === "subject" ? subjectRef.current : bodyRef.current;
+    const field = lastFocused; // "subject" | "body"
+    const current = field === "subject" ? active.subject : active.body;
+
+    // Insert at caret if we have one, otherwise append.
+    const start = el?.selectionStart ?? current.length;
+    const end = el?.selectionEnd ?? current.length;
+    const next = current.slice(0, start) + token + current.slice(end);
+
+    patchActive(field === "subject" ? { subject: next } : { body: next });
+
+    // restore focus + place caret right after the inserted token
+    const caret = start + token.length;
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      }
+    });
   };
 
   const onPickFiles = async (files: FileList | null) => {
@@ -202,12 +234,35 @@ export default function TemplateStep({
               </button>
             </div>
 
-            <div className="mt-5">
+            {/* quick-insert tags from the sample Excel columns */}
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-ink-soft">
+                Insert tag →
+              </span>
+              {SAMPLE_TAGS.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => insertTag(tag)}
+                  title={`Insert {{${tag}}} into the ${lastFocused}`}
+                  className="tag border-ink/30 bg-white/60 transition hover:border-ember hover:bg-ember/10 hover:text-ember-deep"
+                >
+                  {`{{${tag}}}`}
+                </button>
+              ))}
+              <span className="font-mono text-[10px] text-ink/40">
+                (drops into {lastFocused})
+              </span>
+            </div>
+
+            <div className="mt-4">
               <label className="field-label">Subject</label>
               <input
+                ref={subjectRef}
                 className="field-input"
                 placeholder="Hello {{name}}, a quick note"
                 value={active.subject}
+                onFocus={() => setLastFocused("subject")}
                 onChange={(e) => patchActive({ subject: e.target.value })}
               />
             </div>
@@ -217,11 +272,13 @@ export default function TemplateStep({
                 Body — HTML allowed · use {"{{column}}"} for personalization
               </label>
               <textarea
+                ref={bodyRef}
                 className="field-input min-h-[220px] resize-y font-mono text-[13px] leading-relaxed"
                 placeholder={
                   "Hi {{name}},\n\nThanks for your interest in {{company}}.\n\nBest,\nThe Team"
                 }
                 value={active.body}
+                onFocus={() => setLastFocused("body")}
                 onChange={(e) => patchActive({ body: e.target.value })}
               />
             </div>

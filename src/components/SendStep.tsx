@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type {
   ParsedRecipients,
   SendResult,
@@ -19,6 +19,10 @@ interface SendResponse {
   results: SendResult[];
   error?: string;
   detail?: string;
+  /** set when the user stopped the run before all recipients were processed */
+  stopped?: boolean;
+  /** how many recipients were never attempted (only meaningful when stopped) */
+  remaining?: number;
 }
 
 export default function SendStep({
@@ -35,6 +39,13 @@ export default function SendStep({
   );
   const [sending, setSending] = useState(false);
   const [response, setResponse] = useState<SendResponse | null>(null);
+  // live progress while a bulk send is in flight
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(
+    null
+  );
+  // abort flag — ref so the running send loop always reads the latest value
+  const abortRef = useRef(false);
+  const [stopping, setStopping] = useState(false);
 
   const template = useMemo(
     () => templates.find((t) => t.id === templateId) ?? null,
@@ -70,6 +81,8 @@ export default function SendStep({
 
   const send = async () => {
     if (!smtp || !template || recipients.length === 0) return;
+    abortRef.current = false;
+    setStopping(false);
     setSending(true);
     setResponse(null);
 
@@ -79,42 +92,87 @@ export default function SendStep({
       html: render(template.body, r).replace(/\n/g, "<br/>"),
     }));
 
+    const attachments = template.attachments.map((a) => ({
+      filename: a.filename,
+      contentType: a.contentType,
+      dataUrl: a.dataUrl,
+    }));
+
+    // Send in small batches so we can show a live "X / total" counter.
+    const BATCH = 5;
+    const total = messages.length;
+    setProgress({ done: 0, total });
+
+    const allResults: SendResult[] = [];
+
     try {
-      const res = await fetch("/api/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          smtp,
-          messages,
-          attachments: template.attachments.map((a) => ({
-            filename: a.filename,
-            contentType: a.contentType,
-            dataUrl: a.dataUrl,
-          })),
-        }),
-      });
-      const data = (await res.json()) as SendResponse;
-      if (!res.ok) {
-        setResponse({
-          sent: 0,
-          failed: messages.length,
-          results: [],
-          error: data.error || "Send failed.",
-          detail: data.detail,
+      for (let i = 0; i < total; i += BATCH) {
+        // Stop requested — halt before starting the next batch.
+        if (abortRef.current) {
+          const sent = allResults.filter((r) => r.ok).length;
+          setResponse({
+            sent,
+            failed: allResults.length - sent,
+            results: allResults,
+            stopped: true,
+            remaining: total - allResults.length,
+          });
+          setProgress(null);
+          setSending(false);
+          setStopping(false);
+          return;
+        }
+
+        const chunk = messages.slice(i, i + BATCH);
+        const res = await fetch("/api/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ smtp, messages: chunk, attachments }),
         });
-      } else {
-        setResponse(data);
+        const data = (await res.json()) as SendResponse;
+
+        if (!res.ok) {
+          // Auth / config failures abort the whole run with a clear message.
+          setResponse({
+            sent: allResults.filter((r) => r.ok).length,
+            failed: total - allResults.filter((r) => r.ok).length,
+            results: allResults,
+            error: data.error || "Send failed.",
+            detail: data.detail,
+          });
+          setProgress(null);
+          setSending(false);
+          return;
+        }
+
+        allResults.push(...data.results);
+        setProgress({ done: allResults.length, total });
       }
-    } catch (e) {
+
+      const sent = allResults.filter((r) => r.ok).length;
       setResponse({
-        sent: 0,
-        failed: messages.length,
-        results: [],
+        sent,
+        failed: allResults.length - sent,
+        results: allResults,
+      });
+    } catch (e) {
+      const sent = allResults.filter((r) => r.ok).length;
+      setResponse({
+        sent,
+        failed: total - sent,
+        results: allResults,
         error: e instanceof Error ? e.message : "Network error.",
       });
     } finally {
+      setProgress(null);
       setSending(false);
+      setStopping(false);
     }
+  };
+
+  const stop = () => {
+    abortRef.current = true;
+    setStopping(true);
   };
 
   return (
@@ -176,17 +234,54 @@ export default function SendStep({
           </ul>
         )}
 
-        <button
-          className="btn-primary mt-6 w-full py-3 text-sm"
-          disabled={sending || blockers.length > 0}
-          onClick={send}
-        >
-          {sending
-            ? `Sending to ${recipients.length}…`
-            : `Send to ${recipients.length} recipient${
-                recipients.length === 1 ? "" : "s"
-              }`}
-        </button>
+        <div className="mt-6 flex gap-3">
+          <button
+            className="btn-primary flex-1 py-3 text-sm"
+            disabled={sending || blockers.length > 0}
+            onClick={send}
+          >
+            {sending && progress
+              ? `Sending… ${progress.done} / ${progress.total}`
+              : sending
+              ? "Sending…"
+              : `Send to ${recipients.length} recipient${
+                  recipients.length === 1 ? "" : "s"
+                }`}
+          </button>
+          {sending && (
+            <button
+              className="btn-danger shrink-0 py-3"
+              onClick={stop}
+              disabled={stopping}
+            >
+              {stopping ? "Stopping…" : "■ Stop"}
+            </button>
+          )}
+        </div>
+
+        {/* live progress */}
+        {progress && (
+          <div className="mt-4">
+            <div className="flex items-center justify-between font-mono text-[12px]">
+              <span className="text-ink-soft">Sending…</span>
+              <span className="font-semibold">
+                {progress.done} / {progress.total} sent
+              </span>
+            </div>
+            <div className="mt-2 h-3 w-full border-2 border-ink bg-white/50">
+              <div
+                className="h-full bg-ember transition-[width] duration-300 ease-out"
+                style={{
+                  width: `${
+                    progress.total
+                      ? Math.round((progress.done / progress.total) * 100)
+                      : 0
+                  }%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* results */}
         {response && (
@@ -203,31 +298,65 @@ export default function SendStep({
                 )}
               </div>
             ) : (
-              <div className="border-2 border-moss bg-moss/10 p-4">
-                <p className="font-display text-lg font-semibold text-moss">
-                  ✓ {response.sent} sent
-                  {response.failed > 0 && (
-                    <span className="text-ember-deep">
-                      {" "}
-                      · {response.failed} failed
-                    </span>
-                  )}
-                </p>
-                {response.failed > 0 && (
-                  <div className="mt-3 max-h-40 overflow-auto">
-                    {response.results
-                      .filter((r) => !r.ok)
-                      .map((r) => (
-                        <p
-                          key={r.email}
-                          className="font-mono text-[11px] text-ember-deep"
-                        >
-                          {r.email}: {r.error}
-                        </p>
-                      ))}
+              (() => {
+                const sentList = response.results.filter((r) => r.ok);
+                const failedList = response.results.filter((r) => !r.ok);
+                // recipients never attempted (only when stopped early)
+                const attempted = new Set(response.results.map((r) => r.email));
+                const remainingList = recipients
+                  .map((r) => r.email)
+                  .filter((email) => !attempted.has(email));
+
+                return (
+                  <div
+                    className={`border-2 p-4 ${
+                      response.stopped
+                        ? "border-ember-deep bg-ember/10"
+                        : "border-moss bg-moss/10"
+                    }`}
+                  >
+                    <p className="font-display text-lg font-semibold">
+                      {response.stopped ? (
+                        <span className="text-ember-deep">■ Stopped</span>
+                      ) : (
+                        <span className="text-moss">✓ Finished</span>
+                      )}
+                      <span className="ml-2 font-sans text-sm font-normal text-ink-soft">
+                        {response.sent} sent · {response.failed} failed
+                        {remainingList.length > 0 &&
+                          ` · ${remainingList.length} not sent`}
+                      </span>
+                    </p>
+
+                    {/* Sent */}
+                    <ResultList
+                      title={`Sent ✓ (${sentList.length})`}
+                      tone="moss"
+                      items={sentList.map((r) => r.email)}
+                    />
+
+                    {/* Failed */}
+                    {failedList.length > 0 && (
+                      <ResultList
+                        title={`Failed ✗ (${failedList.length})`}
+                        tone="ember"
+                        items={failedList.map(
+                          (r) => `${r.email} — ${r.error ?? "unknown error"}`
+                        )}
+                      />
+                    )}
+
+                    {/* Remaining / not sent (stopped early) */}
+                    {remainingList.length > 0 && (
+                      <ResultList
+                        title={`Not sent (${remainingList.length})`}
+                        tone="ink"
+                        items={remainingList}
+                      />
+                    )}
                   </div>
-                )}
-              </div>
+                );
+              })()
             )}
           </div>
         )}
@@ -289,6 +418,40 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between">
       <span className="text-ink/50">{label}</span>
       <span className="font-semibold text-ink">{value}</span>
+    </div>
+  );
+}
+
+function ResultList({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: string[];
+  tone: "moss" | "ember" | "ink";
+}) {
+  if (items.length === 0) return null;
+  const color =
+    tone === "moss"
+      ? "text-moss"
+      : tone === "ember"
+      ? "text-ember-deep"
+      : "text-ink-soft";
+  return (
+    <div className="mt-3">
+      <p
+        className={`font-mono text-[11px] font-semibold uppercase tracking-[0.12em] ${color}`}
+      >
+        {title}
+      </p>
+      <div className="mt-1 max-h-36 overflow-auto border-l-2 border-ink/15 pl-3">
+        {items.map((line, i) => (
+          <p key={`${line}-${i}`} className={`font-mono text-[11px] ${color}`}>
+            {line}
+          </p>
+        ))}
+      </div>
     </div>
   );
 }
