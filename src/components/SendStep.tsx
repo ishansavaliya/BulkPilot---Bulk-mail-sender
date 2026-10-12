@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import type {
   ParsedRecipients,
   SendResult,
+  Signature,
   SmtpConfig,
   Template,
 } from "@/lib/types";
@@ -12,6 +13,8 @@ import {
   missingPlaceholders,
   render,
 } from "@/lib/placeholders";
+import { loadSignatures } from "@/lib/storage";
+import { appendSignature, previewDoc } from "@/lib/signature";
 
 interface SendResponse {
   sent: number;
@@ -46,10 +49,20 @@ export default function SendStep({
   // abort flag — ref so the running send loop always reads the latest value
   const abortRef = useRef(false);
   const [stopping, setStopping] = useState(false);
+  const [signatures] = useState<Signature[]>(() => loadSignatures());
+  // defaults to the template's linked signature; can be overridden per send
+  const [signatureId, setSignatureId] = useState<string>(
+    templates[0]?.signatureId ?? ""
+  );
 
   const template = useMemo(
     () => templates.find((t) => t.id === templateId) ?? null,
     [templates, templateId]
+  );
+
+  const signature = useMemo(
+    () => signatures.find((s) => s.id === signatureId) ?? null,
+    [signatures, signatureId]
   );
 
   const recipients = parsed?.valid ?? [];
@@ -89,7 +102,10 @@ export default function SendStep({
     const messages = recipients.map((r) => ({
       to: r.email,
       subject: render(template.subject, r),
-      html: render(template.body, r).replace(/\n/g, "<br/>"),
+      html: appendSignature(
+        render(template.body, r).replace(/\n/g, "<br/>"),
+        signature?.html
+      ),
     }));
 
     const attachments = template.attachments.map((a) => ({
@@ -190,12 +206,34 @@ export default function SendStep({
           <select
             className="field-input"
             value={templateId}
-            onChange={(e) => setTemplateId(e.target.value)}
+            onChange={(e) => {
+              setTemplateId(e.target.value);
+              setSignatureId(
+                templates.find((t) => t.id === e.target.value)?.signatureId ??
+                  ""
+              );
+            }}
           >
             <option value="">— choose —</option>
             {templates.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name} {t.attachments.length ? `(📎${t.attachments.length})` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-4">
+          <label className="field-label">Signature</label>
+          <select
+            className="field-input"
+            value={signatureId}
+            onChange={(e) => setSignatureId(e.target.value)}
+          >
+            <option value="">— No signature —</option>
+            {signatures.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name || "Untitled"}
               </option>
             ))}
           </select>
@@ -208,6 +246,7 @@ export default function SendStep({
             label="Attachments"
             value={String(template?.attachments.length ?? 0)}
           />
+          <Row label="Signature" value={signature?.name || "None"} />
           <Row
             label="Sender"
             value={smtp ? smtp.fromEmail : "— not set —"}
@@ -393,6 +432,14 @@ export default function SendStep({
                 __html: preview.body.replace(/\n/g, "<br/>") || "<em>(empty body)</em>",
               }}
             />
+            {signature && (
+              <iframe
+                title="Signature preview"
+                sandbox=""
+                srcDoc={previewDoc(signature.html)}
+                className="mt-4 h-56 w-full border-t border-ink/15 bg-white"
+              />
+            )}
             {template && template.attachments.length > 0 && (
               <div className="mt-5 flex flex-wrap gap-2 border-t border-ink/15 pt-4">
                 {template.attachments.map((a) => (

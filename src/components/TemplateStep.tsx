@@ -1,9 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { StoredAttachment, Template } from "@/lib/types";
-import { loadTemplates, saveTemplates, newId } from "@/lib/storage";
+import type { Signature, StoredAttachment, Template } from "@/lib/types";
+import {
+  loadSignatures,
+  loadTemplates,
+  newId,
+  saveSignatures,
+  saveTemplates,
+} from "@/lib/storage";
 import { extractPlaceholders } from "@/lib/placeholders";
+import SignatureManager from "@/components/SignatureManager";
 
 const MAX_ATTACH_BYTES = 4 * 1024 * 1024; // 4MB/file — keeps localStorage happy
 
@@ -58,12 +65,15 @@ export default function TemplateStep({
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   // which field the cursor was last in, so the tag lands where the user expects
   const [lastFocused, setLastFocused] = useState<"subject" | "body">("body");
+  const [signatures, setSignatures] = useState<Signature[]>([]);
+  const [showSignatures, setShowSignatures] = useState(false);
 
   useEffect(() => {
     const loaded = loadTemplates();
     setTemplates(loaded);
     setActiveId(loaded[0]?.id ?? null);
     onChange(loaded);
+    setSignatures(loadSignatures());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -93,6 +103,26 @@ export default function TemplateStep({
     const next = templates.filter((t) => t.id !== id);
     persist(next);
     if (activeId === id) setActiveId(next[0]?.id ?? null);
+  };
+
+  const persistSignatures = (next: Signature[]) => {
+    // unlink templates whose signature was deleted
+    const ids = new Set(next.map((s) => s.id));
+    if (templates.some((t) => t.signatureId && !ids.has(t.signatureId))) {
+      persist(
+        templates.map((t) =>
+          t.signatureId && !ids.has(t.signatureId)
+            ? { ...t, signatureId: undefined }
+            : t
+        )
+      );
+    }
+    setSignatures(next);
+    try {
+      saveSignatures(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save.");
+    }
   };
 
   const patchActive = (patch: Partial<Template>) => {
@@ -345,6 +375,41 @@ export default function TemplateStep({
                   </p>
                 )}
               </div>
+            </div>
+
+            {/* signature */}
+            <div className="mt-6 border-t-2 border-dashed border-ink/20 pt-5">
+              <div className="flex items-center justify-between">
+                <label className="field-label mb-0">
+                  Signature (appended below the body)
+                </label>
+                <button
+                  className="btn-ghost"
+                  onClick={() => setShowSignatures((v) => !v)}
+                >
+                  {showSignatures ? "Close" : "Manage signatures"}
+                </button>
+              </div>
+              <select
+                className="field-input mt-3"
+                value={active.signatureId ?? ""}
+                onChange={(e) =>
+                  patchActive({ signatureId: e.target.value || undefined })
+                }
+              >
+                <option value="">— No signature —</option>
+                {signatures.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name || "Untitled"}
+                  </option>
+                ))}
+              </select>
+              {showSignatures && (
+                <SignatureManager
+                  signatures={signatures}
+                  onChange={persistSignatures}
+                />
+              )}
             </div>
 
             {error && (

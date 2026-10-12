@@ -1,10 +1,11 @@
 // Thin, SSR-safe localStorage wrapper for SMTP config and templates.
 // All keys are namespaced under "bms:" (bulk mail sender).
 
-import type { SmtpConfig, Template } from "./types";
+import type { Signature, SmtpConfig, Template } from "./types";
 
 const KEY_SMTP = "bms:smtp";
 const KEY_TEMPLATES = "bms:templates";
+const KEY_SIGNATURES = "bms:signatures";
 
 const isBrowser = () => typeof window !== "undefined";
 
@@ -52,6 +53,16 @@ export function loadTemplates(): Template[] {
 
 export function saveTemplates(templates: Template[]) {
   write(KEY_TEMPLATES, templates);
+}
+
+/* ---------------- Signatures ---------------- */
+
+export function loadSignatures(): Signature[] {
+  return read<Signature[]>(KEY_SIGNATURES, []);
+}
+
+export function saveSignatures(signatures: Signature[]) {
+  write(KEY_SIGNATURES, signatures);
 }
 
 /** Generate a reasonably unique id without external deps. */

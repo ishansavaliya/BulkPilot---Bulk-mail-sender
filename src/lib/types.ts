@@ -32,6 +32,18 @@ export interface Template {
   /** Plain-text / simple HTML body. Supports {{placeholder}} tokens. */
   body: string;
   attachments: StoredAttachment[];
+  /** Signature appended below the body; undefined = no signature. */
+  signatureId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Reusable HTML email signature (e.g. an uploaded .html footer). */
+export interface Signature {
+  id: string;
+  name: string;
+  /** Raw HTML, appended as-is below the rendered body. */
+  html: string;
   createdAt: number;
   updatedAt: number;
 }
